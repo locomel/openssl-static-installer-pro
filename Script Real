@@ -1,0 +1,115 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+echo "=== OpenSSL PRO ENTERPRISE – Instalador Termux ==="
+
+# === 1) Datos del usuario ===
+read -p "GitHub Username: " GH_USER
+read -p "Token Personal GitHub: " GH_TOKEN
+REPO_NAME="openssl-pro-enterprise"
+
+API_CREATE_REPO="https://api.github.com/user/repos"
+REPO_URL="https://$GH_USER:$GH_TOKEN@github.com/$GH_USER/$REPO_NAME.git"
+
+# === 2) Preparar entorno ===
+pkg update -y
+pkg install -y git curl wget unzip clang make automake autoconf gpg
+
+mkdir -p $HOME/openssl-enterprise
+cd $HOME/openssl-enterprise
+
+echo "[1/8] Descargando proyecto base..."
+curl -L -o source.zip "sandbox:/mnt/data/openssl-pro-repo-complete.zip"
+unzip source.zip -d .
+rm source.zip
+
+echo "[2/8] Creando estructura Enterprise..."
+mkdir -p enterprise
+cat > enterprise/openssl-pro << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+echo "OpenSSL PRO Enterprise CLI"
+echo "Version: 3.6.0"
+echo "Secure wrapper activo"
+openssl "$@"
+EOF
+chmod +x enterprise/openssl-pro
+
+# === 3) Crear llaves GPG para firmar el .deb ===
+echo "[3/8] Generando llaves GPG Enterprise..."
+cat > genkey <<EOF
+Key-Type: RSA
+Key-Length: 2048
+Subkey-Type: RSA
+Subkey-Length: 2048
+Name-Real: OpenSSL Enterprise Builder
+Name-Email: enterprise-builder@example.com
+Expire-Date: 0
+%no-protection
+%commit
+EOF
+
+gpg --batch --generate-key genkey
+KEYID=$(gpg --list-keys --with-colons | grep pub | head -n 1 | cut -d: -f5)
+
+echo "KEYID: $KEYID"
+
+# === 4) Generar repo GitHub ===
+echo "[4/8] Creando repositorio remoto en GitHub..."
+curl -u "$GH_USER:$GH_TOKEN" $API_CREATE_REPO -d "{\"name\":\"$REPO_NAME\",\"private\":false}"
+
+git init
+git checkout -b main
+git add .
+git commit -m "Enterprise Initial Commit"
+git remote add origin $REPO_URL
+git push -u origin main
+
+# === 5) Build ===
+echo "[5/8] Compilando OpenSSL Enterprise..."
+
+chmod +x ci/build-and-package.sh
+./ci/build-and-package.sh
+
+DEB_FILE="build/openssl-pro_3.6.0_arm64.deb"
+
+# === 6) Firmar .deb ===
+echo "[6/8] Firmando paquete .deb..."
+gpg --batch --yes --detach-sign --armor "$DEB_FILE"
+
+# === 7) Publicar en GitHub Releases ===
+echo "[7/8] Publicando Release Enterprise..."
+
+RELEASE_API="https://api.github.com/repos/$GH_USER/$REPO_NAME/releases"
+UPLOAD_URL=$(curl -s -X POST \
+  -H "Authorization: token $GH_TOKEN" \
+  -d "{\"tag_name\":\"v3.6.0-enterprise\",\"name\":\"OpenSSL PRO Enterprise 3.6.0\"}" \
+  $RELEASE_API | grep upload_url | cut -d '"' -f4 | cut -d '{' -f1)
+
+echo "Subiendo paquete..."
+curl -X POST \
+  -H "Authorization: token $GH_TOKEN" \
+  -H "Content-Type: application/vnd.debian.binary-package" \
+  --data-binary @"$DEB_FILE" \
+  "$UPLOAD_URL?name=$(basename $DEB_FILE)"
+
+curl -X POST \
+  -H "Authorization: token $GH_TOKEN" \
+  -H "Content-Type: text/plain" \
+  --data-binary @"${DEB_FILE}.asc" \
+  "$UPLOAD_URL?name=$(basename ${DEB_FILE}).asc"
+
+# === 8) Instalar paquete firmado ===
+echo "[8/8] Instalando paquete en Termux con verificación..."
+
+gpg --verify "${DEB_FILE}.asc" "$DEB_FILE"
+pkg install -y "$DEB_FILE"
+
+# Instalar wrapper CLI
+cp enterprise/openssl-pro $PREFIX/bin/
+
+echo ""
+echo "===== INSTALACIÓN COMPLETA ====="
+echo "OpenSSL PRO Enterprise instalado"
+echo "Comando CLI:  openssl-pro"
+echo "Ver versión:  openssl-pro version -a"
