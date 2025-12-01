@@ -5,7 +5,7 @@ name:openssl-instaer-pro
 
 # Controls when the workflow will run
 on:
-  - name: Checkout repository
+  - name: openssl-instaer-pro
   uses: actions/checkout@v4
   with:
     fetch-depth: 0
