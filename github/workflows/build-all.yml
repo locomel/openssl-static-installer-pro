@@ -1,0 +1,158 @@
+name: Build-OpenSSL-Full-MultiArch
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+###########################
+#   LINUX BUILDS
+###########################
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch:
+          - { name: "x86_64", config: "linux-x86_64" }
+          - { name: "arm64",  config: "linux-aarch64" }
+          - { name: "armv7",  config: "linux-armv4" }
+          - { name: "i386",   config: "linux-elf" }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential perl wget cmake ninja-build zip gcc-multilib g++-multilib
+
+      - name: Download OpenSSL
+        run: |
+          wget https://www.openssl.org/source/openssl-3.3.2.tar.gz -O openssl.tar.gz
+          tar -xf openssl.tar.gz
+          mv openssl-* openssl
+
+      - name: Configure
+        working-directory: openssl
+        run: |
+          ./Configure \
+            ${{ matrix.arch.config }} \
+            no-shared \
+            --prefix=$PWD/build-${{ matrix.arch.name }} \
+            --openssldir=$PWD/build-${{ matrix.arch.name }}/ssl
+
+      - name: Build
+        working-directory: openssl
+        run: |
+          make -j$(nproc)
+          make install_sw
+          cd ..
+          mkdir output-${{ matrix.arch.name }}
+          cp -r openssl/build-${{ matrix.arch.name }}/* output-${{ matrix.arch.name }}/
+          zip -r openssl-${{ matrix.arch.name }}.zip output-${{ matrix.arch.name }}/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-${{ matrix.arch.name }}
+          path: openssl-${{ matrix.arch.name }}.zip
+
+###########################
+#   MACOS UNIVERSAL BUILD
+###########################
+  build-macos:
+    runs-on: macos-latest
+    needs: build-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          brew install perl make zip
+
+      - name: Download OpenSSL
+        run: |
+          curl -L https://www.openssl.org/source/openssl-3.3.2.tar.gz -o openssl.tar.gz
+          tar -xf openssl.tar.gz
+          mv openssl-* openssl
+
+      # ARM64
+      - name: Configure ARM64
+        working-directory: openssl
+        run: |
+          ./Configure darwin64-arm64-cc no-shared \
+            --prefix=$PWD/build-arm64 \
+            --openssldir=$PWD/build-arm64/ssl
+
+      - name: Build ARM64
+        working-directory: openssl
+        run: |
+          make clean
+          make -j$(sysctl -n hw.logicalcpu)
+          make install_sw
+
+      # X86_64
+      - name: Configure x86_64
+        working-directory: openssl
+        run: |
+          ./Configure darwin64-x86_64-cc no-shared \
+            --prefix=$PWD/build-x86_64 \
+            --openssldir=$PWD/build-x86_64/ssl
+
+      - name: Build x86_64
+        working-directory: openssl
+        run: |
+          make clean
+          make -j$(sysctl -n hw.logicalcpu)
+          make install_sw
+
+      # Create Universal
+      - name: Combine FAT Universal
+        run: |
+          mkdir -p macos-universal/lib
+          mkdir -p macos-universal/bin
+
+          lipo -create openssl/build-arm64/lib/libcrypto.a openssl/build-x86_64/lib/libcrypto.a \
+            -output macos-universal/lib/libcrypto.a
+
+          lipo -create openssl/build-arm64/lib/libssl.a openssl/build-x86_64/lib/libssl.a \
+            -output macos-universal/lib/libssl.a
+
+          lipo -create openssl/build-arm64/bin/openssl openssl/build-x86_64/bin/openssl \
+            -output macos-universal/bin/openssl
+
+          cp -r openssl/build-arm64/include macos-universal/
+
+          zip -r openssl-macos-universal.zip macos-universal/
+
+      - name: Upload macOS Universal
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-macos-universal
+          path: openssl-macos-universal.zip
+
+###########################
+#    RELEASE JOB
+###########################
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos]
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ github.run_number }}"
+          name: "OpenSSL Full Multi-Architecture v${{ github.run_number }}"
+          files: artifacts/*/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
