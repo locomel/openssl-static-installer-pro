@@ -1,0 +1,73 @@
+name: Enterprise CI - Build, Sign & Publish APT Repo
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  SRCVER: "3.6.0"
+  PKGNAME: "openssl-pro-static"
+  ARCH: "arm64"
+  DIST: "stable"
+  COMPONENT: "main"
+  REPO_DIR: "repo"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+          submodules: false
+
+      - name: Install build deps (cross-toolchain + utils)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl git ca-certificates \
+            perl pkg-config dpkg-dev fakeroot \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
+            qemu-user-static gnupg dpkg-scanpackages
+
+      - name: Prepare CI directory
+        run: |
+          mkdir -p ci-output
+          chmod +x ci/*.sh
+
+      - name: Build OpenSSL and create .deb
+        env:
+          SRCVER: ${{ env.SRCVER }}
+          ARCH: ${{ env.ARCH }}
+        run: |
+          ./ci/build-and-package.sh ci-output
+
+      - name: (Optional) Send package to signer service
+        if: ${{ secrets.SIGNER_URL != '' && secrets.SIGNER_TOKEN != '' }}
+        env:
+          SIGNER_URL: ${{ secrets.SIGNER_URL }}
+          SIGNER_TOKEN: ${{ secrets.SIGNER_TOKEN }}
+        run: |
+          # this will create .asc next to the deb if signer is reachable
+          ./ci/send-to-signer.sh "$(ls ci-output/debs/*.deb | head -n1)" "$SIGNER_URL" "$SIGNER_TOKEN" || echo "signer step skipped/fail"
+
+      - name: Create APT repo structure and sign Release (if key provided)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          ./ci/create-repo.sh ci-output repo ${{ env.DIST }} ${{ env.COMPONENT }} ${{ env.ARCH }}
+
+      - name: Publish repo to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GH_PAGES_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./repo
